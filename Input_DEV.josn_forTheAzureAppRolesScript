@@ -1,0 +1,18 @@
+{
+"Azure":[
+  {
+    "TenantId": "<a GUID>",
+    "AppObjectId": "<a GUID>",
+    "AppClientId": "<a GUID>"
+  }
+],
+"Role":[
+  {
+    "Name": "TestRole",
+    "Description": "TestRole description line.",
+    "Id": "<a GUID>",
+    "ADGroupName": "AD-Group-To-Map-to-Role"
+  }
+]}  
+
+
