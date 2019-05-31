@@ -1,0 +1,553 @@
+using System;
+using Microsoft.AspNetCore.Builder;
+
+namespace MyWeb.App_Start.Routes
+{
+    public class CommonRouteConfig
+    {
+        public static void RegisterRoutes(IApplicationBuilder app)
+        {
+            RegisterEmployeeRoutes(app);
+            RegisterChannelRoutes(app);
+            RegisterFiscalYearRoutes(app);
+            RegisterCurrencyRoutes(app);
+        }
+
+        private static void RegisterFiscalYearRoutes(IApplicationBuilder app)
+        {
+            var controllerName = "FiscalYear";
+
+            app.UseMvc(routes =>
+            {
+                // API - GetFiscalYears
+                routes.MapRoute(
+                    name: "Common - GetFiscalYears",
+                    template: "API/FiscalYear",
+                    defaults: new { controller = controllerName, action = "GetFiscalYears" },
+                    constraints: new
+                    {
+                        httpMethod = RouteConfigHelpers.GetMethodConstraint
+                    }
+                );
+            });
+        }
+    
+        private static void RegisterEmployeeRoutes(IApplicationBuilder app)
+		{
+            var controllerName = "Employee";
+
+            app.UseMvc(routes =>
+			{
+                // API - GetCurrentEmployee
+                routes.MapRoute(
+					name: "Common - GetCurrentEmployee",
+					template: "API/Employee/Current",
+					defaults: new {controller = controllerName, action = "GetCurrentEmployee" },
+					constraints: new
+					{
+						httpMethod = RouteConfigHelpers.GetMethodConstraint
+					}
+				);
+
+                // API - GetEmployeeByID
+                routes.MapRoute(
+                    name: "Common - GetEmployeeByID",
+                    template: "API/Employee/{EmployeeID}",
+                    defaults: new { controller = controllerName, action = "GetEmployeeByID" },
+                    constraints: new
+                    {
+                        httpMethod = RouteConfigHelpers.GetMethodConstraint,
+                        EmployeeID = @"\d+",
+                    }
+                );
+
+                // API - GetEmployeeByUID
+                routes.MapRoute(
+                    name: "Common - GetEmployeeByUID",
+                    template: "API/Employee/By/UID/{EmployeeUID}",
+                    defaults: new { controller = controllerName, action = "GetEmployeeByUID" },
+                    constraints: new
+                    {
+                        httpMethod = RouteConfigHelpers.GetMethodConstraint,
+                    }
+                );
+
+                // API - GetEmployeeByItemPersonId
+                routes.MapRoute(
+                    name: "Common - GetEmployeeByItemPersonId",
+                    template: "API/Employee/By/ItemPersonId/{EmployeeItemPersonId}",
+                    defaults: new { controller = controllerName, action = "GetEmployeeByItemPersonId" },
+                    constraints: new
+                    {
+                        httpMethod = RouteConfigHelpers.GetMethodConstraint,
+                    }
+                );
+
+                // API - GetSubordinatesByEmployeeID
+                routes.MapRoute(
+                    name: "Common - GetSubordinatesByEmployeeID",
+                    template: "API/Employee/{EmployeeID}/Subordinate",
+                    defaults: new { controller = controllerName, action = "GetSubordinatesByEmployeeID" },
+                    constraints: new
+                    {
+                        httpMethod = RouteConfigHelpers.GetMethodConstraint,
+                        EmployeeID = @"\d+",
+                    }
+                );
+
+                // API - SearchOnEmployees
+                routes.MapRoute(
+                    name: "Common - SearchOnEmployees",
+                    template: "API/Employee/Search",
+                    defaults: new { controller = controllerName, action = "SearchOnEmployees" },
+                    constraints: new
+                    {
+                        httpMethod = RouteConfigHelpers.GetMethodConstraint
+                    }
+                );
+
+                routes.MapRoute(
+                    name: "Common - SearchSpotLight",
+                    template: "API/PRM/Employee/Search/For/SpotLight/{*SearchText}",
+                    defaults: new { controller = controllerName, action = "SearchSpotLight" },
+                    constraints: new
+                    {
+                        httpMethod = RouteConfigHelpers.PostMethodConstraint
+                    }
+                );
+            });
+		}
+
+        private static void RegisterChannelRoutes(IApplicationBuilder app)
+        {
+            var controllerName = "Channel";
+
+            app.UseMvc(routes =>
+            {
+                // API - GetChannels
+                routes.MapRoute(
+                    name: "Common - GetChannels",
+                    template: "API/Channel",
+                    defaults: new { controller = controllerName, action = "GetChannels" },
+                    constraints: new
+                    {
+                        httpMethod = RouteConfigHelpers.GetMethodConstraint
+                    }
+                );
+            });
+        }
+
+        private static void RegisterCurrencyRoutes(IApplicationBuilder app)
+        {
+            var controllerName = "Currency";
+
+            app.UseMvc(routes =>
+            {
+                routes.MapRoute(
+                    name: "Common - GetConvertedCurrency",
+                    template: "API/Currency/Convert/To/{CurrencyTo}/From/{CurrencyFrom}/{Amount}/At/{Year}/{Month}/{Day}",
+                    defaults: new { controller = controllerName, action = "GetConvertedCurrency" },
+                    constraints: new
+                    {
+                        httpMethod = RouteConfigHelpers.GetMethodConstraint
+                    }
+                );
+
+                routes.MapRoute(
+                    name: "Common - GetCurrencyInCad",
+                    template: "API/Currency/Convert/To/Cad/{CurrencyFrom}/{Amount}/At/{Year}/{Month}/{Day}",
+                    defaults: new { controller = controllerName, action = "GetCurrencyInCad" },
+                    constraints: new
+                    {
+                        httpMethod = RouteConfigHelpers.GetMethodConstraint
+                    }
+                );
+
+            });
+        }
+
+    }
+}
+
+
+=========================================================================================
+using System;
+using GOV.Models;
+using MyWeb.Models;
+using MyWeb.Models.Features.CreditProfile;
+using MyWeb.Models.ItemAndRelationships;
+using MyWeb.Web.Helpers;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using System.Data.SqlClient;
+using System.Threading.Tasks;
+using System.Globalization;
+using MyWeb.Models.Currency;
+
+namespace MyWeb.Web.Controllers
+{
+#if !DEBUG
+    [Authorize(Roles = "User")]
+#endif
+    public class CurrencyController : BaseController
+    {
+        [HttpGet]
+        public ActionResult GetConvertedCurrency([FromRoute]string currencyFrom,
+                                                 [FromRoute]string amount,
+                                                 [FromRoute]string currencyTo,
+                                                 [FromRoute]string year,
+                                                 [FromRoute]string month,
+                                                 [FromRoute]string day)
+        {
+
+
+            if (double.TryParse(amount, out var amountParsed) == false)
+            {
+                throw new System.Exception($"Invalid currency Amount: {amount}");
+            }
+
+            if (DateTime.TryParseExact($"{month}/{day}/{year}", 
+                                       "d", 
+                                       new CultureInfo("en-US"), 
+                                       DateTimeStyles.None, 
+                                       out var atDateParsed) == false)
+            {
+                throw new System.Exception($"Invalid date (YYYY/MM/DD): {year}/{month}/{day}");
+            }
+
+
+            var convertedCurrency = CurrencyExchange.GetConvertedCurrency(currencyFrom,
+                                                                          amountParsed,
+                                                                          currencyTo,
+                                                                          atDateParsed);
+
+            return Ok(convertedCurrency);
+        }
+
+        [HttpGet]
+        public ActionResult GetCurrencyInCad([FromRoute]string currencyFrom,
+                                             [FromRoute]string amount,
+                                             [FromRoute]string year,
+                                             [FromRoute]string month,
+                                             [FromRoute]string day)
+        {
+
+
+            if (double.TryParse(amount, out var amountParsed) == false)
+            {
+                throw new System.Exception($"Invalid currency Amount: {amount}");
+            }
+
+            if (DateTime.TryParseExact($"{month}/{day}/{year}",
+                                       "d",
+                                       new CultureInfo("en-US"),
+                                       DateTimeStyles.None,
+                                       out var atDateParsed) == false)
+            {
+                throw new System.Exception($"Invalid date (YYYY/MM/DD): {year}/{month}/{day}");
+            }
+
+
+            var convertedCurrency = CurrencyExchange.GetCurrencyInCad(currencyFrom,
+                                                                      amountParsed,
+                                                                      atDateParsed);
+
+            return Ok(convertedCurrency);
+        }
+
+    }
+}
+
+
+===============================================================
+
+using System;
+using Dapper;
+using System.Collections.Generic;
+using System.Linq;
+using System.Data;
+using MyWeb.Models.Helpers;
+using System.Threading.Tasks;
+
+
+namespace MyWeb.Models.Currency
+{
+    public class CurrencyExchange : BaseModel
+    {
+
+
+        #region Properties
+
+        public string FromCurrencyCode { get; set; }
+
+        public double FromAmount { get; set; }
+
+        public string ToCurrencyCode { get; set; }
+
+        public DateTime AtDate { get; set; }
+
+        public double ResultAmount { get; set; }
+
+        #endregion
+
+        public static CurrencyExchange GetConvertedCurrency(string fromCurrencyCode,
+                                                            double fromAmount,
+                                                            string toCurrencyCode,
+                                                            DateTime atDate)
+        {
+            const string storedProc = "MyDB.GetConvertedCurrency";
+
+            var toReturn = WithMyAppNameConnection(conn =>
+            {
+                var convertedCurrency = conn.Query<CurrencyExchange>(storedProc, new
+                {
+                    FromCurrencyCode = fromCurrencyCode,
+                    FromAmount = fromAmount,
+                    ToCurrencyCode = toCurrencyCode,
+                    AtDate = atDate
+                },
+                commandType: CommandType.StoredProcedure);
+
+                return convertedCurrency.SingleOrDefault();
+            });
+
+            return toReturn;
+        }
+
+
+        public static CurrencyExchange GetCurrencyInCad(string fromCurrencyCode,
+                                                        double fromAmount,
+                                                        DateTime atDate)
+        {
+            const string toCurrencyCode = "CAD";
+
+            var toReturn = GetConvertedCurrency(fromCurrencyCode,
+                                                fromAmount,
+                                                toCurrencyCode,
+                                                atDate);
+
+            return toReturn;
+        }
+
+
+    }
+}
+
+
+=======================================
+
+CREATE TABLE MyDB.CurrencyExRate
+(
+	EffectiveRateDate			DATETIME		NULL,
+	BaseCurrencyIsoCode			VARCHAR(3)		NULL,
+	QuoteCurrencyIsoCode		VARCHAR(3)		NULL,
+	SpotMidExchangeRate			NUMERIC(28,8)	NULL,
+	Source						VARCHAR(50)		NULL,
+
+	CreateTimeStamp				DATETIME		NOT NULL DEFAULT GETDATE(),
+	CreateUserCode				VARCHAR(255)    NOT NULL DEFAULT SYSTEM_USER,
+	UpdateTimeStamp				DATETIME		NULL,
+	UpdateUserCode				VARCHAR(255)	NULL
+)
+
+
+=============================================
+
+CREATE PROCEDURE MyDB.GetConvertedCurrency
+    @FromCurrencyCode			varchar(3),
+    @FromAmount					numeric(28,8),
+    @ToCurrencyCode				varchar(3),
+    @AtDate						datetime
+AS
+BEGIN TRY
+	Set NOCOUNT ON
+
+	DECLARE		@ErrorMessage varchar(255)
+	DECLARE		@ExchangeRateToCad numeric(28,8)
+	DECLARE		@ExchangeRateFromCad numeric(28,8)
+	DECLARE		@AmountCad numeric(28,8)
+	DECLARE		@ResultAmount numeric(28,8)
+
+
+	IF NOT EXISTS (SELECT TOP 1 1
+					 FROM MyDB.CurrencyExRate
+					WHERE UPPER(QuoteCurrencyIsoCode) = UPPER(@FromCurrencyCode))
+	BEGIN
+		SET @ErrorMessage = CONCAT('Currency not found: ', @FromCurrencyCode)
+		;THROW 50000, @ErrorMessage, 1
+	END
+
+	IF NOT EXISTS (SELECT TOP 1 1
+					 FROM MyDB.CurrencyExRate
+					WHERE UPPER(BaseCurrencyIsoCode) = UPPER(@ToCurrencyCode)
+					   OR UPPER(QuoteCurrencyIsoCode) = UPPER(@ToCurrencyCode))
+	BEGIN
+		SET @ErrorMessage = CONCAT('Currency not found: ', @ToCurrencyCode)
+		;THROW 50000, @ErrorMessage, 1
+	END
+
+
+	IF UPPER(@FromCurrencyCode) = UPPER(@ToCurrencyCode)
+	BEGIN
+		SET	@ResultAmount = @FromAmount
+	END
+	ELSE 
+	BEGIN
+		--Find exchange rate to CAD (which is the base currency in the CurrencyExRates table)
+		SELECT		TOP 1 @ExchangeRateToCad = SpotMidExchangeRate
+		  FROM		MyDB.CurrencyExRate
+
+		 WHERE		UPPER(BaseCurrencyIsoCode) = 'CAD'
+		   AND		UPPER(QuoteCurrencyIsoCode) = UPPER(@FromCurrencyCode)
+		   AND		EffectiveRateDate <= @AtDate
+		 ORDER BY	EffectiveRateDate DESC
+
+		 IF @ExchangeRateToCad IS NULL
+		 BEGIN
+			 SET @ErrorMessage = CONCAT('Exchange rate not found for currency: ', @FromCurrencyCode)
+			 ;THROW 50000, @ErrorMessage, 1
+		 END
+
+		IF UPPER(@ToCurrencyCode) = 'CAD'
+		BEGIN
+			SET	@ResultAmount = @FromAmount / @ExchangeRateToCad
+		END
+		ELSE
+		BEGIN
+			--Find exchange rate from CAD (which is the base currency in the CurrencyExRates table)
+			SELECT		TOP 1 @ExchangeRateFromCad = SpotMidExchangeRate
+			  FROM		MyDB.CurrencyExRate
+
+			 WHERE		UPPER(BaseCurrencyIsoCode) = 'CAD'
+			   AND		UPPER(QuoteCurrencyIsoCode) = UPPER(@ToCurrencyCode)
+			   AND		EffectiveRateDate <= @AtDate
+			 ORDER BY	EffectiveRateDate DESC
+
+			 IF @ExchangeRateFromCad IS NULL
+			 BEGIN
+				 SET @ErrorMessage = CONCAT('Exchange rate not found for currency: ', @ToCurrencyCode)
+				 ;THROW 50000, @ErrorMessage, 1
+			 END
+
+			SET	@ResultAmount = (@FromAmount / @ExchangeRateToCad) * @ExchangeRateFromCad
+		END
+	END
+
+	 -- Return converted currency
+	 SELECT	@FromCurrencyCode	AS 'FromCurrencyCode',
+			@FromAmount			AS 'FromAmount',
+			@ToCurrencyCode		AS 'ToCurrencyCode',
+			@AtDate				AS 'AtDate',
+			@ResultAmount		AS 'ResultAmount'
+END TRY
+
+BEGIN CATCH
+
+	DECLARE @ERROR_NUMBER	INT				= 50000,
+			@ERROR_MESSAGE	NVARCHAR(4000)	= ERROR_MESSAGE(),
+			@ERROR_STATE	NVARCHAR(4000)	= ERROR_STATE()
+
+	IF @@TRANCOUNT > 0
+        ROLLBACK TRAN
+	
+	;THROW @ERROR_NUMBER, @ERROR_MESSAGE, @ERROR_STATE
+
+END CATCH
+
+
+===================================================
+
+using Dapper;
+using Hangfire;
+using Newtonsoft.Json;
+using System;
+using System.Data;
+using System.Data.SqlClient;
+using System.Diagnostics.CodeAnalysis;
+using System.Linq.Expressions;
+using System.Threading.Tasks;
+
+
+
+namespace MyWeb.Models.Helpers
+{
+    public class BaseModel
+    {
+        public virtual string TypeCode { get; }
+
+        public int? ItemRelationID { get; set; }
+
+        public string ItemRelationStringID { get; set; }
+
+        [SuppressMessage("Naming", "TransactionScopeAnalyzer")]
+        protected static T WithMyAppNameConnection<T>(Func<IDbConnection, T> getData)
+        {
+            var toReturn = default(T);
+
+            using (var scope = TransactionScopeBuilder.CreateReadCommitted())
+            using (var connection = new SqlConnection(MyAppConfiguration.MyDBConnectionString))
+            {
+                toReturn = getData(connection);
+                scope.Complete();
+            }
+
+            return toReturn;
+        }
+
+        //[SuppressMessage("Naming", "TransactionScopeAnalyzer")]
+        //protected static T WithMyAppNameConnection<T>(Func<IDbConnection, T> getData, int timeoutInSeconds)
+        //{
+        //    var toReturn = default(T);
+
+        //    using (var scope = TransactionScopeBuilder.CreateReadCommitted(timeoutInSeconds: timeoutInSeconds))
+        //    using (var connection = new SqlConnection(MyAppConfiguration.MyDBConnectionString))
+        //    {
+        //        toReturn = getData(connection);
+        //        scope.Complete();
+        //    }
+
+        //    return toReturn;
+        //}
+
+        [SuppressMessage("Naming", "TransactionScopeAnalyzer")]
+        protected static void WithMyAppNameConnection(Action<IDbConnection> action)
+        {
+            using (var scope = TransactionScopeBuilder.CreateReadCommitted())
+            using (var connection = new SqlConnection(MyAppConfiguration.MyDBConnectionString))
+            {
+                action(connection);
+                scope.Complete();
+            }
+        }
+
+        [SuppressMessage("Naming", "TransactionScopeAnalyzer")]
+        protected static async Task<T> WithMyAppNameConnectionAsync<T>(Func<IDbConnection, Task<T>> getData)
+        {
+            var toReturn = default(T);
+
+            using (var scope = TransactionScopeBuilder.CreateReadCommitted())
+            using (var connection = new SqlConnection(MyAppConfiguration.MyDBConnectionString))
+            {
+                await connection.OpenAsync();
+
+                toReturn = await getData(connection);
+                scope.Complete();
+            }
+
+            return toReturn;
+        }
+        
+        public void EnqueueBackgroundJob(Expression<Action> methodCall)
+        {
+            if (MyAppConfiguration.AzureSearchDb_WithBackgroundJob)
+            {
+                BackgroundJob.Enqueue(methodCall);
+            }
+            else
+            {
+                var action = methodCall.Compile();
+                action();
+            }
+        }
+    }
+}
