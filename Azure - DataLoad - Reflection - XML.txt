@@ -1,0 +1,1182 @@
+
+
+
+======================================
+
+
+    public class AzureADMembership
+    {
+        public string UserObjectId { get; set; }
+        public string UserPrincipalName { get; set; }
+        public string MemberOfGroupObjectId { get; set; }
+        public string MemberOfGroupDisplayName { get; set; }
+    }
+
+	
+=======================================
+
+    public class AzureADOwnership
+    {
+        public string GroupObjectId { get; set; }
+        public string GroupDisplayName { get; set; }
+        public string OwnerUserObjectId { get; set; }
+        public string OwnerUserPrincipalName { get; set; }
+    }	
+
+=======================================
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using Microsoft.Azure.ActiveDirectory.GraphClient;
+using Microsoft.Azure.Services.AppAuthentication;
+using System.Security.Claims;
+using Microsoft.Azure.ActiveDirectory.GraphClient.Extensions;
+using Microsoft.IdentityModel.Clients.ActiveDirectory;
+using System.Security.Cryptography.X509Certificates;
+using NLog;
+using System.IO;
+
+
+namespace MyApp.MyServices.DataLoaders.AzureAD
+{
+    public class AzureADGraphClient
+    {
+
+        private static Logger logger = LogManager.GetCurrentClassLogger();
+        
+        #region Properties
+
+        public IActiveDirectoryClient AdClient { get; set; }
+
+        #endregion
+
+
+        #region Constructors
+        public AzureADGraphClient(string tenantID, string clientID, string thumprint)
+        {
+            var servicePointUri = new Uri("https://graph.windows.net");
+            var serviceRoot = new Uri(servicePointUri, tenantID);
+
+            this.AdClient = new ActiveDirectoryClient(serviceRoot,
+                                                      async () => await GetTokenByCertificateAsync(tenantID, clientID, thumprint));
+        }
+
+
+        public AzureADGraphClient(string tenantID, string clientID, string clientSecret, bool useSecret)
+        {
+            var servicePointUri = new Uri("https://graph.windows.net");
+            var serviceRoot = new Uri(servicePointUri, tenantID);
+
+            this.AdClient = new ActiveDirectoryClient(serviceRoot, 
+                                                      async () => await GetTokenByClientSecretAsync(tenantID, clientID, clientSecret));
+        }
+
+
+        public AzureADGraphClient(IActiveDirectoryClient activeDirectoryClient)
+        {
+            this.AdClient = activeDirectoryClient;
+        }
+
+        #endregion
+
+
+        private static async Task<string> GetTokenByCertificateAsync(string tenantID, string clientId, string thumprint)
+        {
+            var authorityUri = "https://login.microsoftonline.com/" + tenantID;
+            //var authorityUri = "https://login.windows.net/common/oauth2/authorize";
+            var resource = "https://graph.windows.net";
+
+            var certificate = GetCertificate(thumprint);
+            var clientCred = new ClientAssertionCertificate(clientId, certificate);
+
+            var authenticationContext = new AuthenticationContext(authorityUri);
+            var authenticationResult = await authenticationContext.AcquireTokenAsync(resource, clientCred);
+
+            return authenticationResult.AccessToken;
+        }
+
+        private static async Task<string> GetTokenByClientSecretAsync(string tenantID, string clientId, string clientSecret)
+        {
+            var authorityUri = "https://login.microsoftonline.com/" + tenantID;
+            var resource = "https://graph.windows.net";
+
+            var clientCred = new ClientCredential(clientId, clientSecret);
+
+            var authenticationContext = new AuthenticationContext(authorityUri);
+            var authenticationResult = await authenticationContext.AcquireTokenAsync(resource, clientCred);
+
+            return authenticationResult.AccessToken;
+        }
+
+        private static X509Certificate2 GetCertificate(string thumbprint)
+        {
+            X509Certificate2 cert;
+            using (var certStore = new X509Store(StoreName.My, StoreLocation.LocalMachine))
+            {
+                certStore.Open(OpenFlags.ReadOnly);
+                var certCollection = certStore.Certificates.Find(findType: X509FindType.FindByThumbprint,
+                                                                 findValue: thumbprint,
+                                                                 validOnly: false);
+                if (certCollection.Count < 1)
+                {
+                    logger.Error(new FileNotFoundException(),
+                                       $"Certificate not found for thumbprint:{thumbprint}.");
+                }
+                if (certCollection.Count > 1)
+                {
+                    logger.Error(new InvalidOperationException(),
+                                       $"More than one certificate found for thumbprint:{thumbprint}.");
+                }
+                cert = certCollection[0];
+            }
+            return cert;
+        }
+
+
+        public async Task<List<User>> GetAllUsersAsync()
+        {
+            var adUsers = new List<User>();
+
+            var usersPaged = this.AdClient.Users
+                                          .ExecuteAsync()
+                                          .Result;
+
+            if (usersPaged != null)
+            {
+                do
+                {
+                    adUsers.AddRange(usersPaged.CurrentPage
+                                               .ToList()
+                                               .Select(x => x as User));
+
+                } while (usersPaged.MorePagesAvailable != false &&
+                        (usersPaged = await usersPaged.GetNextPageAsync()) != null);
+            }
+
+            return adUsers;
+        }
+
+        public async Task<List<Group>> GetAllGroupsAsync()
+        {
+            var adGroups = new List<Group>();
+
+            var groupsPaged = this.AdClient.Groups
+                                           .ExecuteAsync()
+                                           .Result;
+
+            if (groupsPaged != null)
+            {
+                do
+                {
+                    adGroups.AddRange(groupsPaged.CurrentPage
+                                                     .ToList()
+                                                     .Select(x => x as Group));
+
+                } while (groupsPaged.MorePagesAvailable != false &&
+                        (groupsPaged = await groupsPaged.GetNextPageAsync()) != null);
+            }
+
+            return adGroups;
+        }
+
+        public async Task<List<AzureADMembership>> GetAllUsersMembershipsAsync()
+        {
+            var allMemberships = new List<AzureADMembership>();
+
+            var adUsers = await GetAllUsersAsync();
+
+            foreach (var user in adUsers)
+            {
+                var userMemberships = await GetUserGroupMembershipsAsync(user.ObjectId);
+
+                foreach (var item in userMemberships)
+                {
+                    var membership = new AzureADMembership
+                    {
+                        UserObjectId = user.ObjectId,
+                        UserPrincipalName = user.UserPrincipalName,
+                        MemberOfGroupObjectId = item.ObjectId,
+                        MemberOfGroupDisplayName = item.DisplayName
+                    };
+
+                    allMemberships.Add(membership);
+                }
+            }
+
+            return allMemberships;
+        }
+
+
+        public async Task<List<AzureADOwnership>> GetAllGroupsOwnershipsAsync()
+        {
+            var allOwnerships = new List<AzureADOwnership>();
+
+            var adGroups = await GetAllGroupsAsync();
+
+            foreach (var group in adGroups)
+            {
+                var groupOwnerships = await GetGroupUserOwnershipsAsync(group.ObjectId);
+
+
+                foreach (var item in groupOwnerships) 
+                {
+                    var ownership = new AzureADOwnership
+                    {
+                        GroupObjectId = group.ObjectId,
+                        GroupDisplayName = group.DisplayName,
+                        OwnerUserObjectId = item.ObjectId,
+                        OwnerUserPrincipalName = item.UserPrincipalName
+                    };
+
+                    allOwnerships.Add(ownership);
+                }
+            }
+
+            return allOwnerships;
+        }
+
+
+        public async Task<List<Group>> GetUserGroupMembershipsAsync(string objectId)
+        {
+            var memberOfGroups = new List<Group>();
+
+            if (string.IsNullOrEmpty(objectId))
+                return memberOfGroups;
+
+            var memberOfPaged = this.AdClient.Users[objectId]
+                                             .MemberOf
+                                             .ExecuteAsync()
+                                             .Result;
+
+            if (memberOfPaged != null)
+            {
+                do
+                {
+                    memberOfGroups.AddRange(memberOfPaged.CurrentPage
+                                                         .ToList()
+                                                         .FindAll(x => x.ObjectType == "Group")
+                                                         .Select(x => x as Group));
+
+                } while (memberOfPaged.MorePagesAvailable != false &&
+                        (memberOfPaged = await memberOfPaged.GetNextPageAsync()) != null);
+            }
+
+            return memberOfGroups;
+        }
+
+        public async Task<List<User>> GetGroupUserOwnershipsAsync(string objectId)
+        {
+            var groupOwners = new List<User>();
+
+            if (string.IsNullOrEmpty(objectId))
+                return groupOwners;
+
+            var ownersPaged = this.AdClient.Groups[objectId]
+                                           .Owners
+                                           .ExecuteAsync()
+                                           .Result;
+
+            if (ownersPaged != null)
+            {
+                do
+                {
+                    groupOwners.AddRange(ownersPaged.CurrentPage
+                                                    .ToList()
+                                                    .FindAll(x => x.ObjectType == "User")
+                                                    .Select(x => x as User));
+
+                } while (ownersPaged.MorePagesAvailable != false &&
+                        (ownersPaged = await ownersPaged.GetNextPageAsync()) != null);
+            }
+
+            return groupOwners;
+        }
+
+        public async Task<List<IDirectoryObject>> GetGroupOwnershipsAsync(string objectId)
+        {
+            var groupOwners = new List<IDirectoryObject>();
+
+            if (string.IsNullOrEmpty(objectId))
+                return groupOwners;
+
+            var ownersPaged = this.AdClient.Groups[objectId]
+                                           .Owners
+                                           .ExecuteAsync()
+                                           .Result;
+
+            if (ownersPaged != null)
+            {
+                do
+                {
+                    groupOwners.AddRange(ownersPaged.CurrentPage
+                                                    .ToList());
+
+                } while (ownersPaged.MorePagesAvailable != false &&
+                        (ownersPaged = await ownersPaged.GetNextPageAsync()) != null);
+            }
+
+            return groupOwners;
+        }
+
+
+
+        public Group GetGroupByName(string groupName)
+        {
+            Group adGroup = null;
+
+            var adGroups = this.AdClient.Groups;
+
+            var retrievedGroups = adGroups.Where(w => w.DisplayName == groupName)
+                                          .ExecuteAsync()
+                                          .Result;
+
+            if (retrievedGroups != null)
+            {
+                adGroup = (Group)retrievedGroups.CurrentPage.FirstOrDefault();
+            }
+
+            return adGroup;
+        }
+
+        public Application GetApplicationByID(string appID)
+        {
+            Application adApp = null;
+
+            var adApps = this.AdClient.Applications;
+
+            var retrievedApps = adApps.Where(w => w.AppId == appID)
+                                      .ExecuteAsync()
+                                      .Result;
+
+            if (retrievedApps != null)
+            {
+                adApp = (Application)retrievedApps.CurrentPage.FirstOrDefault();
+            }
+
+            return adApp;
+        }
+
+        public AppRole GetApplicationRoleByName(string appID, string appRoleName)
+        {
+            AppRole appRole = null;
+
+            var application = GetApplicationByID(appID);
+
+            if (application != null)
+            {
+                appRole = application.AppRoles
+                                     .Where(x => x.DisplayName == appRoleName)
+                                     .FirstOrDefault();
+            }
+
+            return appRole;
+        }
+
+        public ServicePrincipal GetServicePrincipalByAppId(string appId)
+        {
+            ServicePrincipal ServPpl = null;
+
+            var adServicePrincipals = this.AdClient.ServicePrincipals;
+
+            var servicePplPaged = adServicePrincipals.Where(x => x.AppId == appId &&
+                                                                 x.ServicePrincipalType == "Application")
+                                                     .ExecuteAsync()
+                                                     .Result;
+
+            if (servicePplPaged != null)
+            {
+                ServPpl = (ServicePrincipal)servicePplPaged.CurrentPage.FirstOrDefault();
+            }
+
+            return ServPpl;
+        }
+
+
+        public async Task<string> GetAdGroupByAppRole(string appID, string appRoleName)
+        {
+            var adGroupName = "";
+
+            var servicePrincipal = GetServicePrincipalByAppId(appID);
+
+            var appRole = GetApplicationRoleByName(appID, appRoleName);
+
+            if (servicePrincipal != null && appRole != null)
+            {
+                var appRoleAssignedToPaged = this.AdClient.ServicePrincipals[servicePrincipal.ObjectId]
+                                                          .AppRoleAssignedTo
+                                                          .ExecuteAsync()
+                                                          .Result;
+
+                if (appRoleAssignedToPaged != null)
+                {
+                    do
+                    {
+
+                        var appRoleAssigned = appRoleAssignedToPaged.CurrentPage
+                                                                    .FirstOrDefault(x => x.Id == appRole.Id && 
+                                                                                         x.PrincipalType == "Group");
+
+                        if (appRoleAssigned != null)
+                        {
+                            adGroupName = appRoleAssigned.PrincipalDisplayName;
+                        }
+
+                    } while (string.IsNullOrEmpty(adGroupName) &&
+                             appRoleAssignedToPaged.MorePagesAvailable != false &&
+                             (appRoleAssignedToPaged = await appRoleAssignedToPaged.GetNextPageAsync()) != null);
+                }
+            }
+
+            return adGroupName;
+        }
+
+
+        public async Task<List<User>> GetAllUsersInADGroupAsync(string groupName)
+        {
+            var memberUsers = new List<User>();
+
+            if (string.IsNullOrEmpty(groupName))
+                return memberUsers;
+
+            var adGroup = GetGroupByName(groupName);
+
+            if (null == adGroup)
+                return memberUsers;
+
+            var adGroupId = GetGroupByName(groupName).ObjectId;
+
+            var membersPaged = this.AdClient.Groups[adGroupId]
+                                            .Members
+                                            .ExecuteAsync()
+                                            .Result;
+
+            if (membersPaged != null)
+            {
+                do
+                {
+                    memberUsers.AddRange(membersPaged.CurrentPage
+                                                     .ToList()
+                                                     .FindAll(x => x.ObjectType == "User")
+                                                     .Select(x => x as User));
+
+                } while (membersPaged.MorePagesAvailable != false &&
+                        (membersPaged = await membersPaged.GetNextPageAsync()) != null);
+            }
+
+            return memberUsers;
+        }
+
+        public async Task<List<string>> GetAllUsersObjectID()
+        {
+            var users = await GetAllUsersAsync();
+
+            var usersObjectID = users.FindAll(x => !string.IsNullOrEmpty(x.ObjectId))
+                                     .Select(x => x.ObjectId)
+                                     .ToList();
+
+            return usersObjectID;
+        }
+
+        public async Task<List<string>> GetAllGroupsObjectID()
+        {
+            var groups = await GetAllGroupsAsync();
+
+            var groupsObjectID = groups.FindAll(x => !string.IsNullOrEmpty(x.ObjectId))
+                                       .Select(x => x.ObjectId)
+                                       .ToList();
+
+            return groupsObjectID;
+        }
+
+
+    }
+}
+
+===========================
+AzureADUsers.xml
+Build Action: Embedded Resource
+Copy to Output: do not copy
+
+===========================
+<?xml version="1.0" encoding="utf-8" ?>
+<DataLoader name="AzureADUsers">
+  <TextFiles>
+    <ClassLoader name="MyApp.MyServices.DataLoaders.DLAzureActiveDirectory"></ClassLoader>
+
+    <Feature>
+      <AzureAD isEnabled="[[AzureAD.Feature]]"></AzureAD>
+    </Feature>
+
+    <Source>
+      <AzureActiveDirectorySearch sourceType="Users"
+                                  tenantId="[[AzureAD.TenantId]]"
+                                  clientId="[[AzureAD.ClientId]]"
+                                  thumprint="[[AzureAD.Thumbprint]]"></AzureActiveDirectorySearch>  
+    </Source>
+    
+    <Destination>
+      <BulkCopy batchSize="500" destinationTableName="CACMData.AzureADUser" cleanDestinationTable="false" dataRetentionDays="10">
+        <ColumnMapping source="ObjectId"></ColumnMapping>
+        <ColumnMapping source="ObjectType"></ColumnMapping>
+        <ColumnMapping source="AccountEnabled"></ColumnMapping>
+        <ColumnMapping source="UserPrincipalName"></ColumnMapping>
+        <ColumnMapping source="DisplayName"></ColumnMapping>
+        <ColumnMapping source="GivenName"></ColumnMapping>
+        <ColumnMapping source="Surname"></ColumnMapping>
+        <ColumnMapping source="Mail"></ColumnMapping>
+        <ColumnMapping source="MailNickname"></ColumnMapping>
+        <ColumnMapping source="Country"></ColumnMapping>
+        <ColumnMapping source="City"></ColumnMapping>
+        <ColumnMapping source="State"></ColumnMapping>
+        <ColumnMapping source="StreetAddress"></ColumnMapping>
+        <ColumnMapping source="PostalCode"></ColumnMapping>
+        <ColumnMapping source="TelephoneNumber"></ColumnMapping>
+        <ColumnMapping source="FacsimileTelephoneNumber"></ColumnMapping>
+        <ColumnMapping source="Mobile"></ColumnMapping>
+        <ColumnMapping source="CompanyName"></ColumnMapping>
+        <ColumnMapping source="Department"></ColumnMapping>
+        <ColumnMapping source="JobTitle"></ColumnMapping>
+        <ColumnMapping source="UsageLocation"></ColumnMapping>
+        <ColumnMapping source="UserType"></ColumnMapping>
+        <ColumnMapping source="CreationType"></ColumnMapping>
+        <ColumnMapping source="DirSyncEnabled"></ColumnMapping>
+        <ColumnMapping source="LastDirSyncTime"></ColumnMapping>
+        <ColumnMapping source="ImmutableId"></ColumnMapping>
+        <ColumnMapping source="OnPremisesSecurityIdentifier"></ColumnMapping>
+        <ColumnMapping source="PhysicalDeliveryOfficeName"></ColumnMapping>
+        <ColumnMapping source="IsCompromised"></ColumnMapping>
+        <ColumnMapping source="PreferredLanguage"></ColumnMapping>
+        <ColumnMapping source="RefreshTokensValidFromDateTime"></ColumnMapping>
+        <ColumnMapping source="SipProxyAddress"></ColumnMapping>
+        
+        <ColumnMapping source="LogDate"></ColumnMapping>
+        <ColumnMapping source="ImportTimestamp"></ColumnMapping>
+      </BulkCopy>
+    </Destination>
+
+  </TextFiles>
+</DataLoader>
+
+
+==========================
+
+using MyApp.MyServices.DataLoaders;
+using MyApp.MyServices.Helpers;
+using NLog;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Data.SqlClient;
+using System.DirectoryServices;
+using System.Linq;
+using System.Security.Principal;
+using System.Xml.Linq;
+using System.Xml.XPath;
+using Microsoft.Azure.ActiveDirectory.GraphClient;
+using MyApp.MyServices.DataLoaders.AzureAD;
+using System.Data.SqlTypes;
+
+namespace MyApp.MyServices.DataLoaders
+{
+    public class DLAzureActiveDirectory : DataLoaderBase, IDataLoader
+    {
+        private static Logger logger = LogManager.GetCurrentClassLogger();
+
+        private const string SOURCE_GROUPS = "Groups";
+        private const string SOURCE_USERS = "Users";
+        private const string SOURCE_MEMBERSHIPS = "Memberships";
+        private const string SOURCE_OWNERSHIPS = "Ownerships";
+        private const string COL_LOGDATE = "LogDate";
+        private const string COL_TIMESTAMP = "ImportTimestamp";
+
+
+        #region Properties
+
+        public string SourceType { get; set; }
+        public string TenantId { get; set; }
+        public string ClientId { get; set; }
+        public string Thumbprint { get; set; }
+        public bool FeatureEnabled { get; set; }
+        public DateTime ImportTimestamp { get; set; }
+
+        private class ColumnMapping
+        {
+            public string SourceField { get; set; }
+            public string DestField { get; set; }
+            public string Parameter1 { get; set; }
+            public string Parameter2 { get; set; }
+            public bool IsGlobal { get; set; }
+            public bool IsMultiple { get; set; }
+        }
+
+        private Dictionary<string, ColumnMapping> ColumnMappings { get; set; }
+
+        private Dictionary<string, System.Reflection.PropertyInfo> TypeProperties { get; set; }
+
+        #endregion
+
+        public DLAzureActiveDirectory() : base()
+        {
+            ImportTimestamp = DateTime.Now;
+        }
+
+        public void SetXmlConfiguration(XDocument xmlDoc)
+        {
+            SetBaseXmlConfiguration(xmlDoc);
+
+            LoadFeatureConfiguration();
+            LoadAzureADConfiguration();
+            LoadDatabaseConfiguration();
+        }
+
+        [DataLoaderJobEventMgmt]
+        public void Execute(DataLoaderJob job, int? fromEventId)
+        {
+            if (FeatureEnabled)
+            {
+                var sourceDataTable = LoadInMemory();
+                LoadInDatabase(sourceDataTable);
+            }
+            else
+            {
+                logger.Info("Source [{0}]: Job not executed because 'AzureAD.Feature' is not set to 'True' in the configuration", DataLoaderCode);
+            }
+
+            RequestFollowingJobs(job);
+        }
+
+        #region Helpers
+
+        #region Load Configuration
+
+        private void LoadFeatureConfiguration()
+        {
+            var azureAdSearchElt = XmlDoc.XPathSelectElement("/DataLoader/*/Feature/AzureAD");
+            FeatureEnabled = Boolean.TryParse(azureAdSearchElt.Attribute("isEnabled").Value, out var azureADFeature) && azureADFeature;
+
+        }
+
+        private void LoadAzureADConfiguration()
+        {
+            var azureAdSearchElt = XmlDoc.XPathSelectElement("/DataLoader/*/Source/AzureActiveDirectorySearch");
+            SourceType = azureAdSearchElt.Attribute("sourceType").Value;
+            TenantId = azureAdSearchElt.Attribute("tenantId").Value;
+            ClientId = azureAdSearchElt.Attribute("clientId").Value;
+            Thumbprint = azureAdSearchElt.Attribute("thumprint").Value;
+
+        }
+
+        private void LoadDatabaseConfiguration()
+        {
+            var bulkCopyElt = XmlDoc.XPathSelectElement("/DataLoader/*/Destination/BulkCopy");
+
+            ColumnMappings = new Dictionary<string, ColumnMapping>();
+            foreach (var mappingElt in bulkCopyElt.XPathSelectElements("ColumnMapping"))
+            {
+                var attrs = mappingElt.Attributes()
+                                      .ToDictionary(a => a.Name.LocalName, a => a.Value);
+
+                var sourceValue = attrs["source"];
+
+                var property = new ColumnMapping();
+                property.SourceField = sourceValue;
+
+                ColumnMappings.Add(sourceValue, property);
+
+                if (attrs.Keys.Contains("dest")) property.DestField = attrs["dest"];
+                else property.DestField = sourceValue;
+
+                if (attrs.Keys.Contains("parameter1")) property.Parameter1 = attrs["parameter1"];
+                if (attrs.Keys.Contains("parameter2")) property.Parameter2 = attrs["parameter2"];
+
+                if (attrs.Keys.Contains("isGlobal") && attrs["isGlobal"] == "true") property.IsGlobal = true;
+                else property.IsGlobal = false;
+
+                if (attrs.Keys.Contains("isMultiple") && attrs["isMultiple"] == "true") property.IsMultiple = true;
+                else property.IsMultiple = false;
+            }
+        }
+
+        #endregion
+
+        private DataTable LoadInMemory()
+        {
+#if DEBUG
+
+            var clientSecret = Thumbprint;
+            var adClient = new AzureADGraphClient(TenantId, ClientId, clientSecret, true);
+
+#else
+
+            var adClient = new AzureADGraphClient(TenantId, ClientId, Thumbprint);
+
+#endif
+
+            var dataTable = InitializeDataTable();
+
+            switch (SourceType)
+            {
+                case SOURCE_USERS:
+                    var adUsers = adClient.GetAllUsersAsync().GetAwaiter().GetResult();
+                    PopulateDataTable(dataTable, adUsers);
+                    break;
+
+                case SOURCE_GROUPS:
+                    var adGroups = adClient.GetAllGroupsAsync().GetAwaiter().GetResult();
+                    PopulateDataTable(dataTable, adGroups);
+                    break;
+
+                case SOURCE_MEMBERSHIPS:
+                    var adMemberships = adClient.GetAllUsersMembershipsAsync().GetAwaiter().GetResult();
+                    PopulateDataTable(dataTable, adMemberships);
+                    break;
+
+                case SOURCE_OWNERSHIPS:
+                    var adOwnerships = adClient.GetAllGroupsOwnershipsAsync().GetAwaiter().GetResult();
+                    PopulateDataTable(dataTable, adOwnerships);
+                    break;
+
+                default:
+                    break;
+            }
+
+            logger.Info("Source [{0}]: number of records to load: {1}", DataLoaderCode, dataTable.Rows.Count);
+
+            return dataTable;
+        }
+
+        private void GetTypeProperties(Object item)
+        {
+            var type = item.GetType();
+            TypeProperties = new Dictionary<string, System.Reflection.PropertyInfo>();
+            foreach (var prop in type.GetProperties())
+            {
+                TypeProperties.Add(prop.Name, prop);
+            }
+        }
+
+#region Load in database
+
+        private DataTable InitializeDataTable()
+        {
+            var dataTable = new DataTable();
+
+            var columnNames = ColumnMappings.Keys;
+            dataTable.Columns.AddRange(columnNames.Select(c => new DataColumn(c)).ToArray());
+
+            return dataTable;
+        }
+
+        private void PopulateDataTable<T>(DataTable dataTable, List<T> items)
+        {
+            if (null != items && items.Count > 0)
+            {
+                ImportTimestamp = DateTime.Now;
+                GetTypeProperties(items.First());
+
+                foreach (var item in items)
+                {
+                    AddRowInDataTable(dataTable, item);
+                }
+            }
+        }
+
+
+        private void AddRowInDataTable(DataTable dataTable, Object item)
+        {
+            var row = dataTable.NewRow();
+
+            foreach (var columnName in ColumnMappings.Keys)
+            {
+                switch (columnName)
+                {
+                    case COL_LOGDATE:
+                        row[columnName] = ImportTimestamp.Date;
+                        break;
+
+                    case COL_TIMESTAMP:
+                        row[columnName] = ImportTimestamp;
+                        break;
+
+                    default:
+                        row[columnName] = GetValidValue(TypeProperties[columnName].GetValue(item));
+                        break;
+                }
+
+            }
+
+            dataTable.Rows.Add(row);
+
+        }
+
+        private Object GetValidValue(Object item)
+        {
+            var result = item;
+
+            if (item != null &&
+                item.GetType() == typeof(DateTime))
+            {
+                result = GetValidSqlDateTime((DateTime)item);
+            }
+
+            return result;
+        }
+
+        private DateTime GetValidSqlDateTime(DateTime value)
+        {
+            var result = value;
+
+            if (value < (DateTime)SqlDateTime.MinValue)
+                result = (DateTime)SqlDateTime.MinValue;
+
+            if (value > (DateTime)SqlDateTime.MaxValue)
+                result = (DateTime)SqlDateTime.MaxValue;
+
+            return result;
+        }
+
+        private void LoadInDatabase(DataTable dataInMemory)
+        {
+            PreProcessLoadDatabase();
+
+            using (var bulkCopy = new SqlBulkCopy(DbInstance.GovConnectionString,
+                                                  SqlBulkCopyOptions.UseInternalTransaction &
+                                                  SqlBulkCopyOptions.KeepNulls))
+            {
+                SetParametersToCopy(bulkCopy);
+
+                bulkCopy.WriteToServer(dataInMemory);
+            }
+
+            logger.Info("Source [{0}]: Records are loaded in database", DataLoaderCode);
+        }
+
+#endregion
+
+#endregion
+
+
+    }
+}
+
+
+==========================
+
+using Dapper;
+using MyApp.MyServices.Helpers;
+using MyApp.MyServices.Models;
+using NLog;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Data.SqlClient;
+using System.Linq;
+using System.Xml.Linq;
+using System.Xml.XPath;
+using MyApp.Models.Helpers;
+
+namespace MyApp.MyServices.DataLoaders
+{
+    public abstract class DataLoaderBase
+    {
+        internal const string TagPostActions = "PostActions";
+        internal const string TagAction = "Action";
+        internal const string TagSqlCommand = "SqlCommand";
+        internal const string TagStoredProc = "StoredProc";
+
+        private static Logger logger = LogManager.GetCurrentClassLogger();
+
+        #region Properties
+
+        public string DataLoaderCode { get; set; }
+        protected XDocument XmlDoc { get; set; }
+
+        public bool CleanDestinationTable { get; set; }
+
+        public int DataRetentionDays { get; set; }
+
+        protected string TableDest { get; set; }
+
+        protected List<DataLoadAction> PostActions { get; set; }
+
+        public bool PostActionInvoked { get; protected set; }
+
+        #endregion
+
+        #region Configuration
+
+        protected void SetBaseXmlConfiguration(XDocument xmlDoc)
+        {
+            XmlDoc = xmlDoc;
+
+            DataLoaderCode = GetDataLoaderCode();
+            CleanDestinationTable = GetCleanDestinationTable();
+            DataRetentionDays = GetDataRetentionDays();
+            TableDest = GetTableDest();
+            PostActions = LoadPostActions();
+        }
+
+        private string GetDataLoaderCode()
+        {
+            return XmlDoc.Root.Attribute("name").Value;
+        }
+
+        private List<DataLoadAction> LoadPostActions()
+        {
+            var postActionCol = XmlDoc.XPathSelectElements("/DataLoader/*/PostActions/Action");
+
+            var actions = new List<DataLoadAction>();
+            foreach (var actElement in postActionCol)
+            {
+                var name = actElement.Attribute("name");
+                var action = new DataLoadAction();
+                if (name != null && !string.IsNullOrWhiteSpace(name.Value))
+                {
+                    action.Name = name.Value;
+                }
+
+                var sqlCmd = actElement.Elements().FirstOrDefault(c => c.Name == TagSqlCommand);
+                var sp = actElement.Elements().FirstOrDefault(c => c.Name == TagStoredProc);
+
+                if (sqlCmd != null && !string.IsNullOrWhiteSpace(sqlCmd.Value))
+                {
+                    action.Command = sqlCmd.Value;
+                    action.ActionType = CommandType.Text;
+                }
+                else if (sp != null && !string.IsNullOrWhiteSpace(sp.Value))
+                {
+                    action.Command = sp.Value;
+                    action.ActionType = CommandType.StoredProcedure;
+                }
+
+                actions.Add(action);
+            }
+            return actions;
+        }
+
+        private bool GetCleanDestinationTable()
+        {
+            var bulkCopyElt = XmlDoc.XPathSelectElement("/DataLoader/*/Destination/BulkCopy");
+            if (bulkCopyElt == null) return false;
+
+            var cleanAttr = bulkCopyElt.Attribute("cleanDestinationTable");
+            if (cleanAttr == null) return false;
+
+            var toClean = cleanAttr.Value;
+            if (String.IsNullOrEmpty(toClean)) return false;
+            if (toClean.ToLower() == "true") return true;
+
+            return false;
+        }
+
+        private int GetDataRetentionDays()
+        {
+            var retDays = 0;
+
+            var bulkCopyElt = XmlDoc.XPathSelectElement("/DataLoader/*/Destination/BulkCopy");
+            if (bulkCopyElt == null) return retDays;
+
+            var retAttr = bulkCopyElt.Attribute("dataRetentionDays");
+            if (retAttr == null) return retDays;
+
+            var retValue = retAttr.Value;
+            if (String.IsNullOrEmpty(retValue)) return retDays;
+            retDays = int.TryParse(retValue, out var result) ? result : 0;
+
+            return retDays;
+        }
+
+        private string GetTableDest()
+        {
+            var bulkCopyElt = XmlDoc.XPathSelectElement("/DataLoader/*/Destination/BulkCopy");
+            if (bulkCopyElt == null) return null;
+
+            var destAttr = bulkCopyElt.Attribute("destinationTableName");
+            if (destAttr == null) return null;
+
+            var destTableName = destAttr.Value;
+            if (String.IsNullOrEmpty(destTableName)) return null;
+
+            return destTableName;
+        }
+
+        #endregion
+
+        protected void RequestFollowingJobs(DataLoaderJob job)
+        {
+            RequestFollowingDataLoaderJobs(job);
+            RequestFollowingDataPointJobs(job);
+        }
+
+        private void RequestFollowingDataLoaderJobs(DataLoaderJob job)
+        {
+            var jobsToExecute = job.GetFollowingDataLoaderJobs();
+
+            foreach (var jobToExecute in jobsToExecute)
+            {
+                logger.Info("Source [{0}]: Request '{1}' job", DataLoaderCode, jobToExecute.Code);
+
+                JobEvent.Create(jobToExecute, JobEventStatusEnum.Requested, job.StartedJobEvent);
+            }
+        }
+
+        private void RequestFollowingDataPointJobs(DataLoaderJob job)
+        {
+            var jobsToExecute = job.GetFollowingDataPointJobs();
+
+            foreach (var jobToExecute in jobsToExecute)
+            {
+                logger.Info("Source [{0}]: Request '{1}' [{2}] dataPoint job", DataLoaderCode,
+                    jobToExecute.CACMTest.Name,
+                    jobToExecute.CACMTest.CACMTestID);
+
+                jobToExecute.JobEventStepID = (int)JobEventStepEnum.GenerateCacmDataPoint;
+
+                JobEvent.Create(jobToExecute, JobEventStatusEnum.Requested, job.StartedJobEvent);
+            }
+        }
+
+        #region Load in database
+
+        protected void PreProcessLoadDatabase()
+        {
+            if (CleanDestinationTable)
+            {
+                TruncateDestData();
+            }
+            else if (DataRetentionDays > 0)
+            {
+                ApplyDataRetentionDestData();
+            }
+        }
+
+        private void TruncateDestData()
+        {
+            if (!CleanDestinationTable) return;
+
+            var sqlStmt = String.Format("TRUNCATE TABLE {0}", TableDest);
+
+            using (var destConn = new SqlConnection(DbInstance.GovConnectionString))
+            {
+                destConn.Execute(sqlStmt);
+            }
+
+            logger.Info("Source [{0}]: '{1}' table is truncated", DataLoaderCode, TableDest);
+        }
+
+        private void ApplyDataRetentionDestData()
+        {
+            if (DataRetentionDays > 0)
+            {
+                var sqlStmt = String.Format("DELETE FROM {0} WHERE DATEDIFF(DAY, ImportTimestamp, GETDATE()) > {1}", 
+                                            TableDest, 
+                                            DataRetentionDays);
+
+                using (var destConn = new SqlConnection(DbInstance.GovConnectionString))
+                {
+                    destConn.Execute(sqlStmt);
+                }
+
+                logger.Info("Source [{0}]: '{1}' table, deleted records older than {2} days", 
+                            DataLoaderCode, 
+                            TableDest, 
+                            DataRetentionDays);
+            }
+        }
+
+        protected virtual void RunPostActions()
+        {
+            if (PostActions == null || !PostActions.Any())
+            {
+                return;
+            }
+
+            using (var scope = TransactionScopeBuilder.CreateReadCommitted())
+            {
+                using (var conn = new SqlConnection(DbInstance.GovConnectionString))
+                {
+                    conn.Open();
+                    try
+                    {
+                        foreach (var action in PostActions)
+                        {
+                            var cmd = new SqlCommand(){ CommandText = action.Command, Connection = conn}; 
+
+                            cmd.CommandType = action.ActionType == CommandType.Text
+                                ? CommandType.Text
+                                : CommandType.StoredProcedure;
+
+                            cmd.ExecuteNonQuery();
+                            logger.Info("Post action executed successfully. Command: \n{0}", action.Name);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.Error(ex, "Error occurred in executing data loading post action.");
+                    }
+                }
+                scope.Complete();
+            }
+        }
+
+        protected void SetParametersToCopy(SqlBulkCopy bulkCopy)
+        {
+            var bulkCopyElt = XmlDoc.XPathSelectElement("/DataLoader/*/Destination/BulkCopy");
+
+            bulkCopy.BatchSize = Int32.Parse(bulkCopyElt.Attribute("batchSize").Value);
+            bulkCopy.DestinationTableName = bulkCopyElt.Attribute("destinationTableName").Value;
+
+            foreach(var mapping in BuildColumnsMapping(bulkCopyElt))
+            {
+                bulkCopy.ColumnMappings.Add(mapping.Key, mapping.Value);
+            }
+        }
+
+        protected Dictionary<string, string> BuildColumnsMapping(XElement bulkCopyElement)
+        {
+            Dictionary<string, string> ret = new Dictionary<string, string>();
+            var columnMappings = bulkCopyElement.XPathSelectElements("ColumnMapping");
+
+            foreach (var columnMapping in columnMappings)
+            {
+                var sourceMapping = columnMapping.Attribute("source").Value;
+
+                var colDest = columnMapping.Attribute("dest");
+                if (colDest == null) colDest = columnMapping.Attribute("source");
+
+                var destMapping = colDest.Value;
+
+                ret.Add(sourceMapping, destMapping);
+            }
+
+            return ret;
+        }
+
+        #endregion
+    }
+}
+
+
+====================================
+
+
+using System.Xml.Linq;
+
+namespace MyApp.MyServices.DataLoaders
+{
+    public interface IDataLoader
+    {
+        string DataLoaderCode { get; set; }
+
+        void SetXmlConfiguration(XDocument xdoc);
+
+        void Execute(DataLoaderJob job, int? fromEventId);
+
+        bool PostActionInvoked { get; }
+    }
+}
