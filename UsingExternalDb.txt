@@ -1,0 +1,94 @@
+using Dapper;
+using Hangfire;
+using Newtonsoft.Json;
+using System;
+using System.Data;
+using System.Data.SqlClient;
+using System.Diagnostics.CodeAnalysis;
+using System.Linq.Expressions;
+using System.Threading.Tasks;
+
+
+
+namespace MyApp.Models.Helpers
+{
+    public class BaseModel
+    {
+        public virtual string TypeCode { get; }
+
+        public int? ItemRelationID { get; set; }
+
+        public string ItemRelationStringID { get; set; }
+
+        [SuppressMessage("Naming", "TransactionScopeAnalyzer")]
+        protected static T WithDBConnection<T>(Func<IDbConnection, T> getData)
+        {
+            var toReturn = default(T);
+
+            using (var scope = TransactionScopeBuilder.CreateReadCommitted())
+            using (var connection = new SqlConnection(AppConfiguration.DBConnectionString))
+            {
+                toReturn = getData(connection);
+                scope.Complete();
+            }
+
+            return toReturn;
+        }
+
+        //[SuppressMessage("Naming", "TransactionScopeAnalyzer")]
+        //protected static T WithDBConnection<T>(Func<IDbConnection, T> getData, int timeoutInSeconds)
+        //{
+        //    var toReturn = default(T);
+
+        //    using (var scope = TransactionScopeBuilder.CreateReadCommitted(timeoutInSeconds: timeoutInSeconds))
+        //    using (var connection = new SqlConnection(AppConfiguration.DBConnectionString))
+        //    {
+        //        toReturn = getData(connection);
+        //        scope.Complete();
+        //    }
+
+        //    return toReturn;
+        //}
+
+        [SuppressMessage("Naming", "TransactionScopeAnalyzer")]
+        protected static void WithDBConnection(Action<IDbConnection> action)
+        {
+            using (var scope = TransactionScopeBuilder.CreateReadCommitted())
+            using (var connection = new SqlConnection(AppConfiguration.DBConnectionString))
+            {
+                action(connection);
+                scope.Complete();
+            }
+        }
+
+        [SuppressMessage("Naming", "TransactionScopeAnalyzer")]
+        protected static async Task<T> WithDBConnectionAsync<T>(Func<IDbConnection, Task<T>> getData)
+        {
+            var toReturn = default(T);
+
+            using (var scope = TransactionScopeBuilder.CreateReadCommitted())
+            using (var connection = new SqlConnection(AppConfiguration.DBConnectionString))
+            {
+                await connection.OpenAsync();
+
+                toReturn = await getData(connection);
+                scope.Complete();
+            }
+
+            return toReturn;
+        }
+        
+        public void EnqueueBackgroundJob(Expression<Action> methodCall)
+        {
+            if (AppConfiguration.AzureSearchDb_WithBackgroundJob)
+            {
+                BackgroundJob.Enqueue(methodCall);
+            }
+            else
+            {
+                var action = methodCall.Compile();
+                action();
+            }
+        }
+    }
+}
